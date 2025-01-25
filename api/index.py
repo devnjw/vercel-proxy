@@ -26,6 +26,7 @@ def multi_model(
     model: Annotated[str, Form(...)],
     documents: List[UploadFile] = File(...),
     authorization: Annotated[str, Header()] = None,
+    stream: Annotated[bool, Form()] = False,
 ):
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Invalid authorization header")
@@ -35,9 +36,13 @@ def multi_model(
     doc_contents = parse_documents(documents, api_key)
     messages = [{"role": "system", "content": doc_contents}] + messages
 
-    return StreamingResponse(
-        stream_chat_completion(messages, model, api_key), media_type="application/json"
-    )
+    if stream:
+        return StreamingResponse(
+            stream_chat_completion(messages, model, api_key),
+            media_type="application/json",
+        )
+    else:
+        return chat_completion(messages, model, api_key)
 
 
 def parse_documents(documents: List[UploadFile], api_key: str) -> str:
@@ -88,3 +93,19 @@ async def stream_chat_completion(messages: List[dict], model: str, api_key: str)
         async with client.stream("POST", url, headers=headers, json=data) as response:
             async for chunk in response.aiter_text():
                 yield chunk
+
+
+def chat_completion(messages: List[dict], model: str, api_key: str):
+    url = 'https://api.upstage.ai/v1/solar/chat/completions'
+    headers = {
+        'authorization': f'Bearer {api_key}',
+        'content-type': 'application/json',
+    }
+    data = {
+        "messages": messages,
+        "model": model,
+        "stream": False,
+    }
+
+    response = requests.post(url, headers=headers, json=data)
+    return response.json()

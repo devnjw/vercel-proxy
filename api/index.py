@@ -1,8 +1,90 @@
-from fastapi import FastAPI
+import requests
+import json
+import httpx
+from typing import List, Literal, Annotated, Optional
+from fastapi import FastAPI, UploadFile, File, Form, Header, HTTPException
+from fastapi.responses import StreamingResponse
 
-### Create FastAPI instance with custom docs and openapi url
-app = FastAPI(docs_url="/api/py/docs", openapi_url="/api/py/openapi.json")
+app = FastAPI()
 
-@app.get("/api/py/helloFastApi")
-def hello_fast_api():
-    return {"message": "Hello from FastAPI"}
+DOCUMENT_PARSE_BASE_URL = "https://api.upstage.ai/v1/document-ai/document-parse"
+DEFAULT_NUM_PAGES = 10
+DOCUMENT_PARSE_DEFAULT_MODEL = "document-parse"
+OCR = Literal["auto", "force"]
+SplitType = Literal["none", "page", "element"]
+OutputFormat = Literal["text", "html", "markdown"]
+
+
+@app.get("/api/health")
+def health_check():
+    return "ok"
+
+
+@app.post("/api/multi_model")
+def multi_model(
+    messages: Annotated[str, Form()],
+    model: Annotated[str, Form(...)],
+    documents: List[UploadFile] = File(...),
+    authorization: Annotated[str, Header()] = None,
+):
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Invalid authorization header")
+
+    api_key = authorization.split("Bearer ")[1]
+    messages = json.loads(messages)
+    doc_contents = parse_documents(documents, api_key)
+    messages = [{"role": "system", "content": doc_contents}] + messages
+
+    return StreamingResponse(
+        stream_chat_completion(messages, model, api_key), media_type="application/json"
+    )
+
+
+def parse_documents(documents: List[UploadFile], api_key: str) -> str:
+    doc_contents = "Documents:\n"
+    for doc in documents:
+        response = requests.post(
+            DOCUMENT_PARSE_BASE_URL,
+            headers={"Authorization": f"Bearer {api_key}"},
+            files={
+                "document": doc.file,
+            },
+        )
+        elements = response.json().get("elements", [])
+        result = ""
+        for element in elements:
+            result += parse_dp_output(element, "html")
+
+        doc_contents += f"{doc.filename}:\n{result}\n\n"
+
+    return doc_contents
+
+
+def parse_dp_output(data: dict, output_format: OutputFormat) -> str:
+    content = data["content"]
+    if output_format == "text":
+        return content["text"]
+    elif output_format == "html":
+        return content["html"]
+    elif output_format == "markdown":
+        return content["markdown"]
+    else:
+        raise ValueError(f"Invalid output type: {output_format}")
+
+
+async def stream_chat_completion(messages: List[dict], model: str, api_key: str):
+    url = 'https://api.upstage.ai/v1/solar/chat/completions'
+    headers = {
+        'authorization': f'Bearer {api_key}',
+        'content-type': 'application/json',
+    }
+    data = {
+        "messages": messages,
+        "model": model,
+        "stream": True,
+    }
+
+    async with httpx.AsyncClient() as client:
+        async with client.stream("POST", url, headers=headers, json=data) as response:
+            async for chunk in response.aiter_text():
+                yield chunk
